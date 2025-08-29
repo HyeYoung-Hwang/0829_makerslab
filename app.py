@@ -1,73 +1,99 @@
+# -------------------------------------------------------------------------
+# 참고: 이 코드의 일부는 다음 GitHub 리포지토리에서 참고하였습니다:
+# https://github.com/lim-hyo-jeong/Wanted-Pre-Onboarding-AI-2407
+# 해당 리포지토리의 라이센스에 따라 사용되었습니다.
+# -------------------------------------------------------------------------
+
+# Streamlit 라이브러리 및 기타 필요한 라이브러리 임포트
 import streamlit as st
-import pandas as pd
 import time
-from io import BytesIO
+from langchain_core.messages import HumanMessage, AIMessage
+from utils import load_model, set_memory, initialize_chain, generate_message
 
-st.set_page_config(page_title="피드백 분류", layout="centered")
-st.title("고객 피드백 분류 리포터")
+# 애플리케이션 제목 설정
+st.title("페르소나 챗봇")
+st.markdown("<br>", unsafe_allow_html=True)  # 브라우저에 줄 바꿈을 삽입합니다.
 
-with st.popover("도움말"):
-    st.markdown("- CSV는 최소 `text` 컬럼을 포함\n- 예시 문장: '배송이 너무 느려요'")
+# 사용자로부터 캐릭터를 선택받기 위한 드롭다운 메뉴 설정
+character_name = st.selectbox(
+    "**캐릭터를 골라줘!**",
+    ("trump", "heavy_grandma"),
+    index=0,
+    key="character_name_select",
+)
+# 선택된 캐릭터 이름을 세션 상태에 저장
+st.session_state.character_name = character_name
 
-with st.expander("파라미터 설명"):
-    st.code("""# 간단 규칙 예:
-if '느려' in text or '지연' in text: label = '불만'
-elif '좋' in text or '감사' in text: label = '칭찬'
-else: label = '요청/기타'""", language="python")
+# 사용자로부터 모델을 선택받기 위한 드롭다운 메뉴 설정
+model_name = st.selectbox(
+    "**모델을 골라줘!**",
+    ("solar-mini","solar-pro2"),
+    index=0,
+    key="model_name_select",
+)
+# 선택된 모델 이름을 세션 상태에 저장
+st.session_state.model_name = model_name
 
-with st.form("cfg"):
-    model = st.radio("분류 방식", ["규칙기반", "키워드+가중치"], horizontal=True)
-    do_lower = st.checkbox("소문자 변환", value=True)
-    keep_neutral = st.checkbox("중립/기타 유지", value=True)
-    submitted = st.form_submit_button("분석 실행")
+# 세션 상태에서 채팅 시작 여부를 확인 및 초기화
+if "chat_started" not in st.session_state:
+    st.session_state.chat_started = False
+    st.session_state.memory = None
+    st.session_state.chain = None
 
-uploaded = st.file_uploader("CSV 업로드", type=["csv"])
 
-result_df = None
-placeholder = st.empty()
+# 채팅을 시작하는 함수 정의
+def start_chat() -> None:
+    """
+    선택된 모델과 캐릭터를 기반으로 채팅을 시작합니다.
 
-def rule_based_label(t: str) -> str:
-    txt = t.lower()
-    if ("느려" in txt) or ("지연" in txt) or ("불만" in txt):
-        return "불만"
-    if ("좋" in txt) or ("만족" in txt) or ("감사" in txt):
-        return "칭찬"
-    return "요청/기타"
+    Streamlit 세션 상태를 사용하여 사용자가 선택한 모델과 캐릭터 이름에 따라
+    언어 모델을 로드하고 대화 메모리를 설정하며, LLM 체인을 초기화합니다.
+    """
+    llm = load_model(st.session_state.model_name)  # 선택된 모델을 로드합니다.
+    st.session_state.chat_started = True  # 채팅 시작 상태를 True로 설정합니다.
+    st.session_state.memory = set_memory()  # 메모리를 초기화합니다.
+    st.session_state.chain = initialize_chain(
+        llm, st.session_state.character_name, st.session_state.memory
+    )  # 체인을 초기화합니다.
 
-if submitted:
-    if uploaded is None:
-        st.warning("CSV 파일을 업로드해줘.")
-    else:
-        df = pd.read_csv(uploaded)
-        if "text" not in df.columns:
-            st.error("CSV에 'text' 컬럼이 필요해.")
+
+# "Start Chat" 버튼을 클릭했을 때 start_chat 함수를 호출
+if st.button("Start Chat"):
+    start_chat()
+
+st.markdown("<br>", unsafe_allow_html=True)  # 브라우저에 줄 바꿈을 삽입합니다.
+
+# 채팅이 시작된 경우
+if st.session_state.chat_started:
+    if st.session_state.memory is None or st.session_state.chain is None:
+        start_chat()  # 메모리나 체인이 초기화되지 않은 경우 다시 초기화합니다.
+
+    # 메모리에 저장된 모든 메시지를 화면에 표시
+    for message in st.session_state.memory.chat_memory.messages:
+        if isinstance(message, HumanMessage):
+            role = "user"  # HumanMessage는 "user" 역할로 설정
+        elif isinstance(message, AIMessage):
+            role = "assistant"  # AIMessage는 "assistant" 역할로 설정
         else:
-            bar = st.progress(0, text="분석 중...")
-            texts = df["text"].astype(str)
-            if do_lower:
-                texts = texts.str.lower()
-            labels = []
-            for i, t in enumerate(texts):
-                labels.append(rule_based_label(t))
-                if i % max(1, len(texts)//100) == 0:
-                    bar.progress(min(100, int((i+1)/len(texts)*100)), text="분석 중...")
-            bar.empty()
-            df["label"] = labels
-            if not keep_neutral:
-                df = df[df["label"] != "요청/기타"]
-            result_df = df
+            continue
+        with st.chat_message(role):  # 해당 역할로 메시지를 화면에 표시
+            st.markdown(message.content)
 
-if result_df is not None:
-    tab_raw, tab_report = st.tabs(["Raw 데이터", "리포트"])
-    with tab_raw:
-        st.dataframe(result_df, use_container_width=True)
-        # 다운로드
-        csv_bytes = result_df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("CSV 다운로드", data=csv_bytes, file_name="feedback_labeled.csv", mime="text/csv")
-    with tab_report:
-        agg = result_df["label"].value_counts().rename_axis("label").reset_index(name="count")
-        st.dataframe(agg)
-        st.markdown("**라벨별 예시 샘플**")
-        for lbl in ["불만","칭찬","요청/기타"]:
-            subset = result_df[result_df["label"]==lbl].head(3)["text"].tolist()
-            st.markdown(f"- **{lbl}**: " + (" / ".join(subset) if subset else "샘플 없음"))
+    # 사용자가 입력한 새로운 메시지를 처리
+    if prompt := st.chat_input("나랑 대화해볼래?"):
+        with st.chat_message("user"):  # 사용자 메시지를 화면에 표시
+            st.markdown(prompt)
+
+        with st.chat_message("assistant"):  # AI 응답을 화면에 표시
+            message_placeholder = st.empty()  # 응답을 표시할 자리 확보
+            full_response = ""
+            response_content = generate_message(
+                st.session_state.chain, prompt
+            )  # AI 응답 생성
+
+            # 응답을 단어 단위로 나누어 점진적으로 화면에 표시
+            for chunk in response_content.split():
+                full_response += chunk + " "
+                time.sleep(0.05)  # 각 단어 사이에 지연을 추가하여 애니메이션 효과
+                message_placeholder.markdown(full_response + "▌")  # 진행 중 표시
+            message_placeholder.markdown(full_response.strip())  # 최종 응답 표시
